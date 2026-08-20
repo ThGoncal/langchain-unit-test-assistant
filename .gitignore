@@ -1,0 +1,54 @@
+# --- Secrets & environnement ---
+.env
+.env.local
+*.env
+!.env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- Environnements virtuels ---
+.venv/
+venv/
+env/
+
+# --- uv ---
+# uv.lock doit rester versionné (reproductibilité des builds) — pas d'entrée ici.
+.uv/
+
+# --- Tests & couverture ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# --- Jupyter (si notebooks d'exploration) ---
+.ipynb_checkpoints/
+
+# --- PyCharm ---
+.idea/
+
+# --- VS Code (au cas où) ---
+.vscode/
+!.vscode/extensions.json
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Docker ---
+*.pid
+
+# --- Logs ---
+*.log
+logs/
+
+# --- LangSmith / traces locales éventuelles ---
+.langsmith/
