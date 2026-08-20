@@ -21,4 +21,5 @@ dependencies = [
     "streamlit==1.47.1",
     "requests==2.32.5",
     "uvicorn==0.35.0",
+    "bcrypt>=5.0.0",
 ]
