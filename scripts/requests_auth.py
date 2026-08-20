@@ -5,7 +5,7 @@ Nécessite que l'API tourne : uvicorn src.api.authentification.auth:app --port 8
 
 import requests
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = "http://localhost:8001"
 
 #####################################################################
 print("--- Signup : alice ---")
