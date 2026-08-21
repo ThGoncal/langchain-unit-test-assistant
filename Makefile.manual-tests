@@ -1,0 +1,81 @@
+# Makefile.manual-tests
+#
+# Boîte à outils de tests manuels/exploratoires pour les 2 APIs en local,
+# sans Docker. Séparé du Makefile principal (dédié à l'orchestration Docker)
+# pour éviter toute collision de noms de cibles (ex: `tests`).
+#
+# Usage :
+#   make -f Makefile.manual-tests test                 -> séquence complète
+#   make -f Makefile.manual-tests unit-tests            -> pytest seul
+#   make -f Makefile.manual-tests manual-auth           -> API auth isolée
+#   make -f Makefile.manual-tests manual-assistant       -> API assistant isolée (mockée)
+#   make -f Makefile.manual-tests manual-integration     -> intégration réelle des 2 APIs
+
+.PHONY: test unit-tests manual-auth manual-assistant manual-integration \
+        start-auth start-main stop-servers logs-dir
+
+AUTH_PORT := 8001
+MAIN_PORT := 8000
+LOG_DIR := logs
+AUTH_PID_FILE := $(LOG_DIR)/auth.pid
+MAIN_PID_FILE := $(LOG_DIR)/main.pid
+
+# --- Cible principale : orchestre tout, du démarrage au nettoyage ---
+test: unit-tests
+	@$(MAKE) -f $(MAKEFILE_LIST) start-auth
+	@$(MAKE) -f $(MAKEFILE_LIST) start-main
+	@echo "\n--- Tests manuels : API auth isolée ---"
+	@PYTHONPATH=src uv run python scripts/requests_auth.py || ( $(MAKE) -f $(MAKEFILE_LIST) stop-servers ; exit 1 )
+	@echo "\n--- Tests manuels : API assistant isolée (dependency_overrides) ---"
+	@PYTHONPATH=src uv run python scripts/requests_main.py || ( $(MAKE) -f $(MAKEFILE_LIST) stop-servers ; exit 1 )
+	@echo "\n--- Tests manuels : intégration réelle auth + assistant ---"
+	@PYTHONPATH=src uv run python scripts/requests_integration.py || ( $(MAKE) -f $(MAKEFILE_LIST) stop-servers ; exit 1 )
+	@$(MAKE) -f $(MAKEFILE_LIST) stop-servers
+	@echo "\n✅ Tous les tests manuels sont passés."
+
+# --- Tests unitaires pytest (rapides, aucun serveur requis) ---
+unit-tests:
+	@echo "--- Tests unitaires : auth ---"
+	uv run python -m pytest tests/test_auth_api.py -v
+	@echo "\n--- Tests unitaires : assistant ---"
+	uv run python -m pytest tests/test_assistant_api.py -v
+
+# --- Création du dossier logs/ si absent ---
+logs-dir:
+	@mkdir -p $(LOG_DIR)
+
+# --- Démarrage des serveurs en arrière-plan, avec attente de disponibilité ---
+start-auth: logs-dir
+	@echo "Démarrage de l'API auth sur le port $(AUTH_PORT)..."
+	@uv run uvicorn api.authentification.auth:app --app-dir src --port $(AUTH_PORT) \
+		> $(LOG_DIR)/auth.manual.log 2>&1 & echo $$! > $(AUTH_PID_FILE)
+	@for i in $$(seq 1 20); do \
+		curl -s http://localhost:$(AUTH_PORT)/docs > /dev/null && break; \
+		sleep 0.5; \
+	done
+
+start-main: logs-dir
+	@echo "Démarrage de l'API assistant sur le port $(MAIN_PORT) (AUTH_URL=http://localhost:$(AUTH_PORT))..."
+	@AUTH_URL=http://localhost:$(AUTH_PORT) uv run uvicorn api.assistant.main:app --app-dir src --port $(MAIN_PORT) \
+		> $(LOG_DIR)/main.manual.log 2>&1 & echo $$! > $(MAIN_PID_FILE)
+	@for i in $$(seq 1 20); do \
+		curl -s http://localhost:$(MAIN_PORT)/docs > /dev/null && break; \
+		sleep 0.5; \
+	done
+
+# --- Arrêt propre des deux serveurs, quoi qu'il arrive ---
+stop-servers:
+	@if [ -f $(AUTH_PID_FILE) ]; then kill $$(cat $(AUTH_PID_FILE)) 2>/dev/null || true; rm -f $(AUTH_PID_FILE); fi
+	@if [ -f $(MAIN_PID_FILE) ]; then kill $$(cat $(MAIN_PID_FILE)) 2>/dev/null || true; rm -f $(MAIN_PID_FILE); fi
+
+# --- Cibles individuelles, pour rejouer un seul scénario en isolation ---
+manual-auth: start-auth
+	@PYTHONPATH=src uv run python scripts/requests_auth.py
+	@$(MAKE) -f $(MAKEFILE_LIST) stop-servers
+
+manual-assistant:
+	@PYTHONPATH=src uv run python scripts/requests_main.py
+
+manual-integration: start-auth start-main
+	@PYTHONPATH=src uv run python scripts/requests_integration.py
+	@$(MAKE) -f $(MAKEFILE_LIST) stop-servers
