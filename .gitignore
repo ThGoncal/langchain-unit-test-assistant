@@ -52,3 +52,8 @@ logs/
 
 # --- LangSmith / traces locales éventuelles ---
 .langsmith/
+
+# Fichiers générés par Makefile.manual-tests
+*.manual.log
+.auth.pid
+.main.pid
