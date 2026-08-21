@@ -3,7 +3,8 @@
 .PHONY: up down build rebuild logs test tests
 
 up:
-	docker compose up -d auth main streamlit
+	#docker compose up -d auth main streamlit
+	docker compose up -d auth main
 
 down:
 	docker compose down
