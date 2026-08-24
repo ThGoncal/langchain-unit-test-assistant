@@ -9,27 +9,42 @@ Fournit :
                   HTTP pour valider un token, plutôt que de décoder le JWT
                   elle-même.
 
-La base de données est simulée par un dictionnaire en mémoire (fake_users_db).
+La base de données est simulée par un dictionnaire en mémoire (fake_users_db),
+conformément à l'énoncé de l'examen — non thread-safe et non persistante par
+choix assumé, pas par oubli (voir README, section "Pistes d'amélioration").
 Les mots de passe ne sont jamais stockés ni comparés en clair : hash bcrypt à
-l'inscription, vérification via bcrypt.checkpw() à la connexion.
+l'inscription, vérification via bcrypt.checkpw() à la connexion. Aucune
+validation de complexité du mot de passe n'est appliquée volontairement, pour
+rester compatible avec le contrat de test fourni par l'examen.
 """
 
+import logging
 import os
 import time
 
 import bcrypt
 import jwt
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
+
+load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
 # Configuration
 # --------------------------------------------------------------------------
 
-JWT_SECRET = os.environ.get("JWT_SECRET", "change-me-in-production")
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION_SECONDS = 600  # 10 minutes
+JWT_SECRET = os.environ.get("JWT_SECRET")
+if not JWT_SECRET:
+    raise RuntimeError(
+        "JWT_SECRET est manquant. Définis-le dans ton fichier .env "
+        "(voir .env.example)."
+    )
+JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
+JWT_EXPIRATION_SECONDS: int = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_SECONDS", "600"))
 
 app = FastAPI(title="Authentification API")
 
@@ -53,7 +68,7 @@ class UserLogin(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
-    token_type: str = "bearer"
+    token_type: str = "Bearer"
 
 
 class User(BaseModel):
@@ -66,10 +81,12 @@ class User(BaseModel):
 # --------------------------------------------------------------------------
 
 def hash_password(password: str) -> str:
+    """Hache un mot de passe en clair via bcrypt, prêt à être stocké."""
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
 def check_password(plain_password: str, hashed_password: str) -> bool:
+    """Vérifie qu'un mot de passe en clair correspond à un hash bcrypt stocké."""
     return bcrypt.checkpw(
         plain_password.encode("utf-8"), hashed_password.encode("utf-8")
     )
@@ -80,12 +97,14 @@ def check_password(plain_password: str, hashed_password: str) -> bool:
 # --------------------------------------------------------------------------
 
 def sign_jwt(username: str) -> TokenResponse:
-    payload = {"sub": username, "exp": time.time() + JWT_EXPIRATION_SECONDS}
+    """Génère un JWT signé HS256 pour l'utilisateur donné, valide JWT_EXPIRATION_SECONDS."""
+    payload = {"sub": username, "exp": int(time.time()) + JWT_EXPIRATION_SECONDS}
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
     return TokenResponse(access_token=token)
 
 
 def decode_jwt(token: str) -> dict:
+    """Décode et valide un JWT ; lève une HTTPException 401 explicite si invalide/expiré."""
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except jwt.ExpiredSignatureError:
@@ -98,7 +117,7 @@ def decode_jwt(token: str) -> dict:
 class JWTBearer(HTTPBearer):
     """Garde d'accès réutilisable pour protéger une route via le JWT."""
 
-    def __init__(self, auto_error: bool = True):
+    def __init__(self, auto_error: bool = True) -> None:
         super().__init__(auto_error=auto_error)
 
     async def __call__(self, request: Request) -> str:
@@ -113,29 +132,35 @@ class JWTBearer(HTTPBearer):
 # Endpoints
 # --------------------------------------------------------------------------
 
-@app.post("/signup")
-def signup(user: UserSignup):
+@app.post("/signup", response_model=User)
+async def signup(user: UserSignup) -> User:
     """
     Inscrit un nouvel utilisateur.
 
     Raises:
     - HTTPException(400): si le nom d'utilisateur existe déjà.
+    - HTTPException(500): en cas d'erreur inattendue lors du hachage.
     """
     if user.username in fake_users_db:
+        logger.warning("Tentative d'inscription refusée : username '%s' déjà pris.", user.username)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Ce nom d'utilisateur existe déjà",
         )
 
-    fake_users_db[user.username] = {
-        "username": user.username,
-        "hashed_password": hash_password(user.password),
-    }
-    return {"username": user.username}
+    try:
+        hashed = hash_password(user.password)
+    except Exception:
+        logger.exception("Échec du hachage du mot de passe pour '%s'.", user.username)
+        raise HTTPException(status_code=500, detail="Erreur interne lors de l'inscription.")
+
+    fake_users_db[user.username] = {"username": user.username, "hashed_password": hashed}
+    logger.info("Nouvel utilisateur inscrit : '%s'.", user.username)
+    return User(username=user.username)
 
 
 @app.post("/login", response_model=TokenResponse)
-def login(credentials: UserLogin):
+async def login(credentials: UserLogin) -> TokenResponse:
     """
     Vérifie les identifiants et renvoie un jeton d'accès.
 
@@ -153,7 +178,7 @@ def login(credentials: UserLogin):
 
 
 @app.get("/me", response_model=User)
-def get_current_user(username: str = Depends(JWTBearer())):
+async def get_current_user(username: str = Depends(JWTBearer())) -> User:
     """
     Renvoie l'identité de l'utilisateur courant à partir du JWT.
     Appelée en HTTP par l'API principale pour valider un token reçu.

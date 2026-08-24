@@ -1,305 +1,345 @@
-# Examen LangChain : Assistant de Tests Unitaires Python
+# 🧪 LangChain Unit Test Assistant
 
-## Consignes générales
+Assistant IA basé sur LangChain qui analyse du code Python, génère des tests
+unitaires pytest, les explique, et propose un pipeline complet d'évaluation —
+le tout exposé via deux API FastAPI sécurisées par JWT et une interface
+Streamlit.
 
-L'examen a pour objectif de développer un assistant intelligent capable d'analyser du code Python, de générer automatiquement des tests unitaires avec `pytest`, et d'expliquer ces tests de manière pédagogique.
+Projet réalisé dans le cadre de l'examen du module **LangChain & LLM
+Experimentation** (certification MLOps / ML Engineering).
 
-Pour y parvenir, vous devrez mettre en place une architecture complète combinant plusieurs outils :
+## Sommaire
 
-- **LangChain** pour gérer les chaînes, les prompts, les schémas structurés et la mémoire
-- **FastAPI** pour exposer les fonctionnalités à travers une API
-- **Docker** avec un **Makefile** afin de conteneuriser et d'orchestrer l'ensemble du projet
-- une interface utilisateur avec **Streamlit** peut être ajoutée en complément, mais elle reste optionnelle
+- [Architecture](#architecture)
+- [Fonctionnalités](#fonctionnalités)
+- [Stack technique](#stack-technique)
+- [Installation](#installation)
+- [Lancement](#lancement)
+- [Tests](#tests)
+- [Interface Streamlit](#interface-streamlit)
+- [Observabilité](#observabilité)
+- [Structure du projet](#structure-du-projet)
+- [Choix d'architecture](#choix-darchitecture)
+- [Notes de développement](#notes-de-développement)
+- [Limites connues](#limites-connues)
+- [Pistes d'amélioration](#pistes-damélioration)
 
-Pour réaliser cet examen, un répertoire GitHub vous est mis à disposition :
-[langchain_examen](https://github.com/DataScientest/exam_Langchain)
+## Architecture
 
-La première étape consiste à cloner ce dépôt sur votre machine afin de disposer de toute la structure de projet attendue.
+Deux services FastAPI indépendants, chacun conteneurisé séparément et
+communiquant via un réseau Docker dédié :
 
-Ce dépôt sert de squelette : il vous fournit l'architecture de base que vous devrez compléter en implémentant les différents composants.
+```mermaid
+graph TB
+    subgraph Client
+        UI[Interface Streamlit :8501]
+        CLI[Scripts / curl / Swagger UI]
+    end
 
-## Versions de référence
+    UI -->|HTTP| MAIN
+    CLI -->|HTTP| MAIN
+    CLI -->|HTTP| AUTH
 
-Pour rester aligné avec le cours, vous pouvez partir sur les versions suivantes :
+    subgraph "Réseau Docker (app_network)"
+        AUTH["API Authentification :8001<br/>signup / login / me"]
+        MAIN["API Assistant :8000<br/>analyze / generate_test / explain_test<br/>full_pipeline / chat / history"]
+    end
 
-```toml
-langchain = "1.2.12"
-langchain-core = "1.2.20"
-langchain-community = "0.4.1"
-langgraph = "1.1.3"
-langsmith = "0.7.20"
-langchain-groq = "1.1.2"
-langchain-openai = "1.1.11"
-fastapi = "0.116.1"
-uvicorn = "0.35.0"
-python-multipart = "0.0.20"
-pydantic = "2.11.7"
-python-dotenv = "1.1.1"
+    MAIN -->|"GET /me — délégation JWT"| AUTH
+    MAIN -->|Appels LLM structurés| GROQ[(Groq API)]
+    MAIN -.- LANGSMITH[(LangSmith)]
 ```
+
+**Principe clé** : l'API `main` ne décode jamais elle-même les JWT. Chaque
+requête protégée déclenche un appel HTTP `GET /me` vers l'API `auth`, seule
+détentrice de `JWT_SECRET`. Ce découplage permet de faire évoluer la logique
+d'authentification (rotation de secret, révocation de tokens...) sans jamais
+toucher au code de `main`.
+
+## Fonctionnalités
+
+| Endpoint | Méthode | Description |
+|---|---|---|
+| `/signup` | POST | Inscription d'un utilisateur (API auth) |
+| `/login` | POST | Connexion, renvoie un JWT (API auth) |
+| `/me` | GET | Identité déduite du JWT — appelée par `main`, pas seulement l'utilisateur (API auth) |
+| `/analyze` | POST | Analyse un code Python (`is_optimal`, `issues`, `suggestions`) |
+| `/generate_test` | POST | Génère un test unitaire pytest pour un code donné |
+| `/explain_test` | POST | Explique en langage naturel un test unitaire donné |
+| `/full_pipeline` | POST | Analyse → arrêt si non optimal, sinon génération + explication |
+| `/chat` | POST | Conversation libre avec mémoire de contexte par utilisateur |
+| `/history` | GET | Historique des échanges de l'utilisateur courant |
+
+Toutes les routes de l'API assistant (sauf implicitement via FastAPI) exigent
+un header `Authorization: Bearer <token>` valide.
+
+## Stack technique
+
+| Composant | Choix |
+|---|---|
+| Framework API | FastAPI 0.116 |
+| Orchestration LLM | LangChain 1.2 / LangGraph 1.1 |
+| Fournisseur LLM | Groq (`openai/gpt-oss-120b` par défaut, configurable) |
+| Observabilité | LangSmith (endpoint EU) |
+| Authentification | JWT (PyJWT) + bcrypt |
+| Interface | Streamlit 1.47 |
+| Gestion de paquets | uv (`pyproject.toml` / `uv.lock`) |
+| Conteneurisation | Docker + docker-compose |
+| Tests | pytest (unitaires + intégration conteneurs) |
+
+## Installation
+
+```bash
+git clone https://github.com/ThGoncal/langchain-unit-test-assistant
+cd langchain-unit-test-assistant
+cp .env.example .env
+```
+
+Renseigne dans `.env` :
+- `GROQ_API_KEY` — clé API Groq
+- `CHAT_MODEL` — modèle Groq utilisé (ex. `groq:openai/gpt-oss-120b`)
+- `JWT_SECRET` — secret de signature des tokens (obligatoire, aucune valeur par défaut)
+- `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_ENDPOINT` — traçabilité (endpoint EU)
+
+```bash
+uv sync
+```
+
+## Lancement
+
+### Avec Docker (recommandé pour une évaluation fidèle à la production)
+
+```bash
+make setup   # crée .env à partir du template si absent
+make up      # build + démarre auth, main et streamlit
+make logs    # suivre les logs de tous les services
+make down    # arrêter
+make clean   # arrêter + supprimer conteneurs, volumes et réseaux
+```
+
+`make up` construit et démarre désormais les 3 services (`auth`, `main`,
+`streamlit`) — l'interface est accessible sur `http://localhost:8501`.
+
+### En local sans Docker (développement)
+
+```bash
+uv run uvicorn api.authentification.auth:app --app-dir src --reload --port 8001
+AUTH_URL=http://localhost:8001 uv run uvicorn api.assistant.main:app --app-dir src --reload --port 8000
+```
+
+## Tests
+
+```bash
+make tests                               # suite complète en conteneurs (9 tests)
+uv run pytest tests/ -v                  # tests unitaires seuls, sans Docker
+make -f Makefile.manual-tests tests      # tests manuels bout-en-bout (unitaires + API réelle + intégration réelle)
+```
+
+`Makefile.manual-tests` démarre les deux serveurs en local, rejoue des
+scénarios réels (y compris les cas d'erreur : token absent, invalide, API
+auth indisponible) contre de vraies réponses LLM, puis nettoie proprement —
+complémentaire aux tests fournis, qui eux mockent les chaînes LangChain.
+
+### Non-régression sur `/analyze`
+
+`fixtures/code_samples/` contient des échantillons de code Python classés en
+`optimal/` et `non_optimal/`, rejoués par `scripts/regression_check.py`
+contre l'endpoint `/analyze` pour vérifier que le jugement du LLM reste
+cohérent d'une session à l'autre (utile après un changement de prompt, de
+modèle Groq, ou de température).
+
+**Limite assumée** : `is_optimal` n'est pas parfaitement déterministe même à
+température basse (voir [Limites connues](#limites-connues)) — ce mécanisme
+est un canari, pas un test pass/fail strict. Un écart isolé n'indique pas
+forcément une régression ; un écart systématique sur plusieurs exécutions,
+plus probablement.
+
+## Interface Streamlit
+
+```bash
+AUTH_URL=http://localhost:8001 API_URL=http://localhost:8000 uv run streamlit run src/app.py
+```
+
+Ouvre `http://localhost:8501` : inscription/connexion, puis 6 onglets
+correspondant à chaque endpoint. Le test généré dans l'onglet "Générer un
+test" est automatiquement repris dans "Expliquer un test".
+
+## Observabilité
+
+Chaque appel LLM est tracé sur LangSmith (projet défini par
+`LANGSMITH_PROJECT`), avec un nom explicite par chaîne
+(`analyse_code`, `generation_test`, `explication_test`, `agent_chat`) plutôt
+que le nom générique par défaut — utile pour distinguer rapidement les runs
+lors d'une revue.
 
 ## Structure du projet
 
-```txt
-exam_Langchain/
-├── .env
-├── .python-version
-├── pyproject.toml
-├── Makefile
+```
+## Structure du projet
+
+```text
+.
 ├── docker-compose.yml
+├── Dockerfile.test
+├── Makefile                        # orchestration Docker (setup/up/down/build/test/clean...)
+├── Makefile.manual-tests           # tests manuels bout-en-bout, hors Docker
 ├── README.md
-└── src/
-    ├── api/
-    │   ├── authentification/
-    │   │   ├── Dockerfile.auth
-    │   │   ├── requirements.txt
-    │   │   └── auth.py
-    │   └── assistant/
-    │       ├── Dockerfile.main
-    │       ├── requirements.txt
-    │       └── main.py
-    ├── core/
-    │   ├── llm.py
-    │   ├── chains.py
-    │   └── schemas.py
-    ├── memory/
-    │   └── memory.py
-    ├── prompts/
-    │   └── prompts.py
-    ├── Dockerfile.streamlit
-    ├── requirements.txt
-    └── app.py
+├── README_exam.md                  # énoncé original de l'examen, conservé pour référence
+├── pyproject.toml / uv.lock
+├── logs/                           # généré par Makefile.manual-tests (ignoré par git)
+├── fixtures/
+│   └── code_samples/               # échantillons de non-régression pour /analyze
+│       ├── optimal/
+│       └── non_optimal/
+├── scripts/
+│   ├── requests_auth.py            # test manuel de l'API auth isolée
+│   ├── requests_main.py            # test manuel de l'API assistant isolée (mockée)
+│   ├── requests_integration.py     # test manuel des 2 API réellement intégrées
+│   └── regression_check.py         # rejoue fixtures/ contre /analyze, détecte les dérives   
+├── src/
+│   ├── app.py                      # interface Streamlit
+│   ├── Dockerfile.streamlit
+│   ├── requirements.txt            # dépendances partagées (core/prompts/memory)
+│   ├── api/
+│   │   ├── authentification/       # API auth (signup/login/me)
+│   │   │   ├── Dockerfile.auth
+│   │   │   ├── auth.py
+│   │   │   └── requirements.txt
+│   │   └── assistant/              # API principale (6 endpoints métier)
+│   │       ├── Dockerfile.main
+│   │       ├── main.py
+│   │       └── requirements.txt
+│   ├── core/                       # llm.py, schemas.py, chains.py
+│   ├── prompts/                    # prompts CLEAR
+│   └── memory/                     # historique par utilisateur
+└── tests/
+    ├── conftest.py
+    ├── test_auth_api.py                # unitaire, TestClient
+    ├── test_assistant_api.py           # unitaire, chaînes mockées
+    └── test_container_integration.py   # intégration, vrais conteneurs
 ```
 
-L'ensemble des consignes décrites ci-dessous doit être suivi en vous appuyant sur cette structure déjà préparée.
-
-### Le LLM (`src/core/llm.py`)
-
-Le coeur de l'assistant repose sur le modèle de langage.
-Ce fichier a pour rôle de configurer et d'initialiser le modèle choisi.
-
-L'implémentation doit inclure :
-
-- un modèle principal, utilisé par défaut pour toutes les requêtes
-- une récupération des clés API depuis le fichier `.env`
-
-Exemple de variables d'environnement :
-
-```env
-GROQ_API_KEY="your_api_key"
-CHAT_MODEL="groq:llama-3.3-70b-versatile"
-LANGSMITH_TRACING=true
-LANGSMITH_API_KEY=<your_api_key>
-LANGSMITH_PROJECT=exam_langchain
 ```
 
-
-### Les Prompts (`src/prompts/prompts.py`)
-
-Les prompts jouent un rôle central dans l'architecture.
-Ils définissent la manière dont le modèle doit raisonner et formuler ses réponses.
-
-Dans cet examen, vous devez mettre en place différents prompts correspondant aux fonctionnalités attendues de l'assistant :
-
-- **Prompt d'analyse de code** : demande au LLM d'évaluer un extrait de code Python et de déterminer s'il est optimal. Le modèle doit identifier d'éventuels problèmes et proposer des améliorations.
-- **Prompt de génération de tests unitaires** : à partir d'une fonction Python donnée, l'assistant doit produire un test unitaire en `pytest`.
-- **Prompt d'explication de tests** : explication pédagogique et détaillée d'un test unitaire.
-- **Prompt de conversation libre** : discussion naturelle avec l'utilisateur.
-
-Chaque prompt doit être construit de façon claire, avec les bons placeholders, afin que le modèle reçoive les bonnes informations.
-
-### Les schémas structurés (`src/core/schemas.py`)
-
-Les sorties du modèle doivent être transformées en objets structurés et exploitables.
-
-Dans cet examen, vous pouvez vous appuyer sur des schémas Pydantic, par exemple :
-
-- `CodeAnalysisResult`
-- `GeneratedTestResult`
-- `TestExplanationResult`
-
-Ces schémas doivent permettre :
-
-- une validation du format attendu
-- un retour clair dans les endpoints API
-- une meilleure robustesse face aux erreurs de format du modèle
-
-### Les Chaînes (`src/core/chains.py`)
-
-Les chaînes LangChain constituent le coeur logique de l'assistant.
-Chaque fonctionnalité repose sur une chaîne dédiée.
-
-Vous devez mettre en place plusieurs chaînes :
-
-- **Chaîne d'analyse de code** : utilise le prompt d'analyse, envoie la requête au LLM, puis structure la réponse.
-- **Chaîne de génération de tests unitaires** : prend en entrée une fonction Python et renvoie un test unitaire en `pytest`.
-- **Chaîne d'explication de tests** : transforme un test Python en une explication claire et pédagogique.
-- **Chaîne de chat libre** : permet une conversation libre avec continuité de contexte.
-
-Pattern attendu pour les chaînes structurées :
-
-```python
-chain = prompt | llm.with_structured_output(MySchema)
-```
-
-Chaque chaîne doit être construite de manière simple et modulaire, afin que l'API puisse les invoquer directement.
-
-### La Mémoire (`src/memory/memory.py`)
-
-La mémoire doit être implémentée de manière à gérer plusieurs utilisateurs en parallèle.
-
-Points importants à respecter :
-
-- le `thread_id` ou identifiant utilisateur doit être unique
-- une solution en mémoire suffit pour l'examen
-- le système doit permettre de conserver l'historique d'une conversation tant que le service tourne
-
-### Les APIs (`src/api/`)
-
-L'examen repose sur deux APIs distinctes, toutes deux développées avec FastAPI et exécutées dans des conteneurs séparés.
-
-#### L'API d'authentification (`src/api/authentification/`)
-
-Cette API est dédiée à la gestion de la sécurité et des utilisateurs. Elle doit permettre :
-
-- **L’inscription (signup)** : créer un nouvel utilisateur et l’enregistrer dans une base (ici simulée par une structure interne).
-- **La connexion (login)** : vérifier les identifiants permettant d’accéder aux autres services.
-
-Chaque endpoint doit renvoyer des erreurs claires en cas de problème.
-
-#### L'API principale (`src/api/assistant/`)
-
-Cette API constitue le coeur de l'assistant. Elle doit exposer plusieurs endpoints permettant d'interagir avec les chaînes définies dans `src/core/`.
-
-Les fonctionnalités attendues sont :
-
-- **Analyser un code Python (`/analyze`)**
-- **Générer un test unitaire (`/generate_test`)**
-- **Expliquer un test (`/explain_test`)**
-- **Exécuter le pipeline complet (`/full_pipeline`)**
-- **Chat conversationnel (`/chat`)**
-- **Historique (`/history`)**
-
-Rôle de chaque endpoint :
-
-- **`/analyze`** : reçoit un code Python et renvoie une analyse structurée du code
-- **`/generate_test`** : reçoit un code Python et renvoie un test unitaire `pytest`
-- **`/explain_test`** : reçoit un test et renvoie une explication pédagogique
-- **`/full_pipeline`** : enchaîne plusieurs étapes automatiquement pour éviter à l'utilisateur de les lancer une par une
-- **`/chat`** : permet une conversation libre avec mémoire entre plusieurs messages
-- **`/history`** : permet de consulter les échanges déjà enregistrés pour une session ou un utilisateur
-
-Points d'attention :
-
-- les résultats des endpoints `/analyze`, `/generate_test`, `/explain_test` et `/full_pipeline` doivent être enregistrés dans l'historique associé à l'utilisateur
-- les deux APIs doivent tourner dans des conteneurs distincts
-- l'API principale dépend de l'API d'authentification pour vérifier l'identité des utilisateurs
-- une gestion rigoureuse des erreurs est indispensable : les exceptions doivent être transformées en réponses HTTP explicites
-
-### Logique du pipeline complet
-
-L'endpoint `/full_pipeline` doit suivre cette logique :
-
-1. analyser le code soumis
-2. si le code est jugé non optimal, arrêter le pipeline et renvoyer l'analyse
-3. sinon, générer un test unitaire
-4. puis expliquer ce test de manière pédagogique
-
-Cette logique permet de montrer que l'application sait prendre une décision simple en fonction d'un premier résultat.
-
-### Suivi et Monitoring avec LangSmith
-
-Pour améliorer la traçabilité et le suivi de l'assistant, il est nécessaire d'intégrer LangSmith.
-
-LangSmith permet notamment de :
-
-- tracer toutes les requêtes envoyées au LLM
-- visualiser les chaînes et leurs étapes
-- déboguer plus facilement en cas d'erreur
-- comparer plusieurs versions de prompts ou de chaînes
-
-Une bonne habitude est de tester vos endpoints dans `/docs`, puis d'aller voir ensuite dans LangSmith :
-
-- le prompt réellement envoyé
-- la réponse du modèle
-- la chaîne ou l'agent utilisé
-- les éventuelles erreurs
-
-### Interface Streamlit
-
-En plus des APIs, vous pouvez proposer une interface utilisateur développée avec Streamlit.
-Elle reste **optionnelle**.
-
-Fonctionnalités possibles :
-
-- authentification et connexion
-- analyse de code
-- génération de tests
-- explication de tests
-- pipeline complet
-- chat libre
-- affichage de l'historique
-
-### Déploiement avec Docker et Makefile
-
-L'ensemble du projet doit être conteneurisé afin de garantir une mise en place simple, reproductible et indépendante de l'environnement de développement.
-
-Services attendus :
-
-- **auth** : l'API d'authentification
-- **main** : l'API principale
-- **streamlit** : l'interface utilisateur si vous choisissez de l'ajouter
-
-### Makefile
-
-Chaque service dispose de son propre `Dockerfile` et de ses dépendances.
-
-Le Makefile doit centraliser toutes les commandes utiles au projet. Lse déploiement complet du projet ne doit nécessiter qu’une seule commande :
-
-```bash
-make
-```
-
-### README.md
-
-Votre projet doit obligatoirement contenir un fichier `README.md` clair et structuré.
-Ce document doit expliquer le fonctionnement global de votre assistant, ainsi que la manière de le déployer et de le tester.
-
-Il doit notamment contenir :
-
-- les étapes pour configurer le fichier `.env`
-- les commandes principales du `Makefile`
-- la liste des endpoints disponibles et des ports
-
-### Tests à réaliser (make tests)
-
-Instructions minimales à prévoir pour vérifier que l'API fonctionne correctement :
-
-- inscription
-- login
-- analyse
-- génération de test
-- explication
-- pipeline complet
-- chat avec mémoire
-- affichage de l'historique
-
-## Rappels et conseils
-
-Avant de commencer, gardez en tête les points suivants :
-
-- **Organisation** : respectez scrupuleusement la structure fournie
-- **Variables d'environnement** : ne mettez jamais vos clés en clair dans le code
-- **Prompts** : utilisez les bons placeholders pour injecter les informations utiles
-- **Schémas structurés** : utilisez-les pour fiabiliser les sorties du modèle
-- **Mémoire** : utilisez un identifiant clair pour éviter de mélanger les historiques
-- **Docker** : ne mettez dans vos images que ce qui est nécessaire
-- **README** : écrivez-le comme si le lecteur ne connaissait pas votre projet
-- **Tests** : vérifiez les fonctionnalités au fur et à mesure
-
-## Rendu
-
-N'oubliez pas d'uploader votre examen au format d'une archive zip ou tar, dans l'onglet **Mes Exams**, après avoir validé tous les exercices du module.
-
-> ⚠️ **IMPORTANT** ⚠️ : N’envoyez pas votre environnement virtuel (par ex. .venv ou uv) dans votre rendu. En cas de non-respect de cette consigne, un **repass automatique** de l’examen vous sera attribué.
-
-Félicitations ! Si vous avez atteint ce point, vous avez terminé le module sur LangChain et LLM Experimentation ! 🎉.
+## Choix d'architecture
+
+- **Factories plutôt qu'instances globales** (`get_analysis_chain()`,
+  `get_llm()`...) : permet le remplacement des chaînes par des stubs en test
+  unitaire (`monkeypatch.setattr`) sans jamais solliciter le LLM réel.
+- **`method="json_mode"` plutôt que le mode outil par défaut** de
+  `with_structured_output()` : Groq peut échouer avec `tool_choice is
+  required` sur des tâches de génération en prose libre — le mode JSON est
+  plus tolérant, au prix de devoir mentionner explicitement "JSON" dans
+  chaque prompt système.
+- **Prompts rédigés selon la méthode CLEAR** (Contexte, Longueur, Exemples,
+  Audience, Rôle), avec exemples few-shot sur les 3 chaînes structurées —
+  améliore la fiabilité du format de sortie au-delà du seul `json_mode`.
+- **Température différenciée par chaîne** : 0.1 pour l'analyse et la
+  génération de test (reproductibilité recherchée), 0.3 pour l'explication,
+  0.7 pour le chat (naturel recherché).
+- **Double mécanisme de mémoire** : le checkpointer LangGraph
+  (`InMemorySaver`, indexé par `thread_id`) sert le modèle pour le contexte
+  conversationnel ; `memory.py` sert l'API pour exposer `/history` — deux
+  responsabilités distinctes, volontairement non fusionnées.
+
+## Notes de développement
+
+Quelques difficultés réelles rencontrées et résolues pendant le
+développement, gardées ici à titre de documentation technique :
+
+- **Dépréciation d'un modèle Groq en cours de projet** (`llama-3.3-70b-versatile`
+  retiré du catalogue) — a confirmé l'intérêt de piloter le modèle via
+  `CHAT_MODEL` plutôt qu'en dur dans le code.
+- **`tool_choice is required, but model did not call a tool`** sur la chaîne
+  d'explication — résolu par le passage à `method="json_mode"` (voir
+  ci-dessus).
+- **Exposition accidentelle du fichier `.env`** dans l'historique Git du
+  premier dépôt — purgé via `git filter-repo`, puis dépôt recréé proprement
+  avec un `.gitignore` posé dès le premier commit.
+- **Couplage inattendu entre les deux conteneurs** : l'import direct
+  `from api.authentification.auth import User` dans `main.py` (imposé par
+  les tests fournis) implique que l'image `main` embarque aussi les
+  dépendances (`bcrypt`, `pyjwt`) et la variable `JWT_SECRET` de l'API auth,
+  alors qu'elle ne décode jamais elle-même de JWT.
+- **Bug Streamlit "magic"** : une expression ternaire utilisée comme
+  instruction (`st.success(...) if cond else st.warning(...)`) était
+  interceptée par le magic de Streamlit et affichée via `st.help()` au lieu
+  d'être simplement exécutée — corrigé en repassant par un `if`/`else`
+  classique, plus adapté au contrôle d'effets de bord.
+- **Variable `JWT_SECRET` manquante côté conteneur `tests`** — le service
+  `tests` de `docker-compose.yml` ne recevait pas `env_file: .env`,
+  contrairement à `auth`/`main`. Resté invisible tant qu'`auth.py` avait une
+  valeur par défaut permissive pour `JWT_SECRET` ; révélé après le
+  durcissement (`raise RuntimeError` si absent) — corrigé en ajoutant
+  `env_file` au service `tests`.  
+
+## Limites connues
+
+- **Persistance en mémoire uniquement** (utilisateurs, historique) : tout
+  redémarrage d'un conteneur efface les données — assumé pour un examen,
+  inacceptable en production.
+- **Jugement `is_optimal` non parfaitement déterministe** malgré une
+  température basse — propriété du LLM sous-jacent, pas du code applicatif.
+- **Un seul provider LLM supporté** (Groq) sans mécanisme de repli en cas de
+  dépréciation de modèle.
+
+## Pistes d'amélioration
+
+Le périmètre ci-dessous dépasse volontairement les exigences de l'examen —
+il documente comment ce projet évoluerait vers une application de
+production.
+
+### Fiabilité des données
+- **PostgreSQL pour l'authentification** (remplacer `fake_users_db`) —
+  survie aux redémarrages, contraintes d'unicité gérées par la base plutôt
+  qu'en code, migrations versionnées (Alembic).
+- **Historique conversationnel persistant** (Postgres ou Redis) au lieu du
+  dict en mémoire de `memory.py` — nécessaire dès qu'on a plusieurs
+  instances de `main` (voir load balancing ci-dessous), puisqu'un dict en
+  mémoire process n'est pas partagé entre répliques.
+- **Refresh tokens et révocation** — actuellement un JWT compromis reste
+  valide jusqu'à expiration (10 min) sans moyen de le invalider plus tôt ;
+  une liste de révocation (Redis) ou des refresh tokens à durée courte
+  réduiraient cette fenêtre.
+
+### Sécurité et scalabilité réseau
+- **Nginx en reverse proxy** devant `auth` et `main` : terminaison TLS,
+  masquage des ports internes, en-têtes de sécurité (HSTS, CSP), et
+  limitation de débit (`limit_req`) pour se protéger contre les abus,
+  particulièrement pertinent vu le coût des appels LLM par requête.
+- **Équilibrage de charge** : plusieurs répliques de `main` derrière Nginx
+  (`upstream` avec plusieurs conteneurs `main`), pertinent dès que
+  l'historique/mémoire est externalisé (Postgres/Redis, cf. ci-dessus) —
+  sans ça, chaque réplique aurait sa propre mémoire in-process désynchronisée.
+- **Secrets via un gestionnaire dédié** (Vault, AWS Secrets Manager...)
+  plutôt que `.env`/`env_file` — élimine le risque de fuite qu'on a
+  rencontré concrètement pendant ce projet.
+
+### Robustesse du modèle LLM
+- **Validation et repli automatique du modèle configuré** (`CHAT_MODEL`) —
+  déjà conçu et testé pendant ce projet (vérification via
+  `Groq().models.list()`, repli sur un modèle de secours, avertissement
+  explicite), volontairement non intégré pour rester dans le périmètre
+  strict de l'examen.
+- **Callbacks LangChain personnalisés** (`BaseCallbackHandler`) — au-delà du
+  traçage LangSmith, un callback dédié permettrait de calculer des métriques
+  métier propres (taux de code jugé optimal, temps de réponse par chaîne,
+  coût cumulé par utilisateur) et de les exposer via un endpoint `/metrics`
+  (Prometheus) plutôt que de dépendre uniquement d'un tableau de bord
+  externe.
+- **Fallback multi-provider** (ex. bascule Groq → OpenAI en cas
+  d'indisponibilité prolongée) via le mécanisme `.with_fallbacks()` natif de
+  LangChain.
+
+### Qualité et exploitation
+- **CI/CD** (GitHub Actions) exécutant `make tests` sur chaque pull request,
+  avec rapport de couverture (`pytest-cov`) publié en commentaire de PR.
+- **Logs structurés** (JSON, corrélés par `request_id`) plutôt que les logs
+  uvicorn par défaut — facilite l'agrégation dans un système centralisé
+  (ELK, Loki) une fois plusieurs répliques en jeu.
+- **Rate limiting par utilisateur** au niveau applicatif (pas seulement
+  Nginx) — pertinent vu le coût direct de chaque appel au LLM.
+
+---
+
+**Auteur** : Thierry ([@ThGoncal](https://github.com/ThGoncal))

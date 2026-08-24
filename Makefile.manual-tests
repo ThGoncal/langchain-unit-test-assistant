@@ -21,7 +21,7 @@ AUTH_PID_FILE := $(LOG_DIR)/auth.pid
 MAIN_PID_FILE := $(LOG_DIR)/main.pid
 
 # --- Cible principale : orchestre tout, du démarrage au nettoyage ---
-test: unit-tests
+tests: unit-tests
 	@$(MAKE) -f $(MAKEFILE_LIST) start-auth
 	@$(MAKE) -f $(MAKEFILE_LIST) start-main
 	@echo "\n--- Tests manuels : API auth isolée ---"
@@ -30,6 +30,8 @@ test: unit-tests
 	@PYTHONPATH=src uv run python scripts/requests_main.py || ( $(MAKE) -f $(MAKEFILE_LIST) stop-servers ; exit 1 )
 	@echo "\n--- Tests manuels : intégration réelle auth + assistant ---"
 	@PYTHONPATH=src uv run python scripts/requests_integration.py || ( $(MAKE) -f $(MAKEFILE_LIST) stop-servers ; exit 1 )
+	@echo "\n--- Tests manuels : analyse des réponses de l'assistant ---"
+	@PYTHONPATH=src uv run python scripts/regression_check.py || ( $(MAKE) -f $(MAKEFILE_LIST) stop-servers ; exit 1 )
 	@$(MAKE) -f $(MAKEFILE_LIST) stop-servers
 	@echo "\n✅ Tous les tests manuels sont passés."
 
@@ -73,9 +75,13 @@ manual-auth: start-auth
 	@PYTHONPATH=src uv run python scripts/requests_auth.py
 	@$(MAKE) -f $(MAKEFILE_LIST) stop-servers
 
-manual-assistant:
+manual-assistant: start-main
 	@PYTHONPATH=src uv run python scripts/requests_main.py
 
 manual-integration: start-auth start-main
 	@PYTHONPATH=src uv run python scripts/requests_integration.py
+	@$(MAKE) -f $(MAKEFILE_LIST) stop-servers
+
+manual-analyse: start-auth start-main
+	@PYTHONPATH=src uv run python scripts/regression_check.py
 	@$(MAKE) -f $(MAKEFILE_LIST) stop-servers
