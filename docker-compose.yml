@@ -25,20 +25,22 @@ services:
     environment:
       AUTH_URL: http://auth:8001
 
-#  streamlit:
-#    # build à définir - voir remarque ci-dessous
-#    ports:
-#      - "8501:8501"
-#    depends_on:
-#      - auth
-#      - main
-#    networks:
-#      - app_network
-#    env_file:
-#      - .env
-#    environment:
-#      AUTH_URL: http://auth:8001
-#      API_URL: http://main:8000
+  streamlit:
+    build:
+      context: .
+      dockerfile: src/Dockerfile.streamlit
+    ports:
+      - "8501:8501"
+    depends_on:
+      - auth
+      - main
+    networks:
+      - app_network
+    env_file:
+      - .env
+    environment:
+      AUTH_URL: http://auth:8001
+      API_URL: http://main:8000
 
   tests:
     build:
@@ -47,6 +49,8 @@ services:
     depends_on:
       - auth
       - main
+    env_file:
+      - .env
     environment:
       RUN_CONTAINER_TESTS: "true"
       AUTH_URL: "http://auth:8001"
