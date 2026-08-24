@@ -81,3 +81,7 @@ manual-assistant: start-main
 manual-integration: start-auth start-main
 	@PYTHONPATH=src uv run python scripts/requests_integration.py
 	@$(MAKE) -f $(MAKEFILE_LIST) stop-servers
+
+manual-analyse: start-auth start-main
+	@PYTHONPATH=src uv run python scripts/regression_check.py
+	@$(MAKE) -f $(MAKEFILE_LIST) stop-servers
